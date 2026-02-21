@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
+  base: '/LOTERY-ANALIZER-AI/',
   plugins: [
     react(),
     VitePWA({
@@ -16,8 +17,8 @@ export default defineConfig({
         background_color: '#080b14',
         display: 'standalone',
         orientation: 'portrait',
-        scope: '/',
-        start_url: '/',
+        scope: '/LOTERY-ANALIZER-AI/',
+        start_url: '/LOTERY-ANALIZER-AI/',
         icons: [
           {
             src: 'icon-192.png',
@@ -38,6 +39,5 @@ export default defineConfig({
         ]
       }
     })
-  ],
-  base: './'
+  ]
 });
