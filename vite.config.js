@@ -12,30 +12,14 @@ export default defineConfig({
       manifest: {
         name: 'Analizador Pro RD',
         short_name: 'Loterias RD',
-        description: 'Analizador de Loterias Dominicanas con IA',
         theme_color: '#080b14',
         background_color: '#080b14',
         display: 'standalone',
-        orientation: 'portrait',
         scope: '/LOTERY-ANALIZER-AI/',
         start_url: '/LOTERY-ANALIZER-AI/',
         icons: [
-          {
-            src: 'icon-192.png',
-            sizes: '192x192',
-            type: 'image/png'
-          },
-          {
-            src: 'icon-512.png',
-            sizes: '512x512',
-            type: 'image/png'
-          },
-          {
-            src: 'icon-512.png',
-            sizes: '512x512',
-            type: 'image/png',
-            purpose: 'any maskable'
-          }
+          { src: 'icon-192.png', sizes: '192x192', type: 'image/png' },
+          { src: 'icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' }
         ]
       }
     })
