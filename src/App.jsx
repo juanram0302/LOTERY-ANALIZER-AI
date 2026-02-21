@@ -1,0 +1,1138 @@
+import { useState, useEffect, useCallback, useRef } from "react";
+
+/* ============================================================
+   KNOWN LOTTERY NAMES
+   ============================================================ */
+const KNOWN = [
+  "New York 10:30 PM","New York 3:30","New York 3:30 PM","New York 12:30","New York 12:30 PM","New York 7:30","New York 7:30 PM",
+  "Florida Noche","Florida Tarde","Florida Dia","Florida Day",
+  "Loteria Nacional","Lotería Nacional","Nacional",
+  "Anguila 10:00 AM","Anguila 1:00 PM","Anguila 6:00 PM","Anguila 9:00 PM",
+  "Leidsa","Leidsa Tarde","Loteka","Lotería Real","Loteria Real",
+  "La Primera Noche","La Primera Dia","La Primera Día","Primera Dia","Primera Día",
+  "La Suerte Tarde","La Suerte 12:30 PM","La Suerte 12:30","La Suerte",
+  "Gana Mas","Gana Más","Quiniela Pale","Quiniela",
+  "King Lottery","King","LoteDom","Lotedom","Mega Chances","Loto Pool","Super Pale","Juega Mas","Juega Más"
+];
+
+const norm = function(s) {
+  return s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9\s:]/g, "").replace(/\s+/g, " ").trim();
+};
+
+const KNOWN_NORM = KNOWN.map(function(n) { return { o: n, n: norm(n) }; });
+
+function matchLot(line) {
+  var ln = norm(line);
+  for (var i = 0; i < KNOWN_NORM.length; i++) {
+    if (ln === KNOWN_NORM[i].n) return KNOWN_NORM[i].o;
+  }
+  for (var j = 0; j < KNOWN_NORM.length; j++) {
+    if (KNOWN_NORM[j].n.length > 4 && ln.includes(KNOWN_NORM[j].n)) return KNOWN_NORM[j].o;
+  }
+  return null;
+}
+
+var canonMap = {};
+function addC(variants, canon) { variants.forEach(function(v) { canonMap[norm(v)] = canon; }); }
+addC(["New York 10:30 PM","New York 10:30"], "New York 10:30 PM");
+addC(["New York 3:30","New York 3:30 PM"], "New York 3:30");
+addC(["New York 12:30","New York 12:30 PM"], "New York 12:30");
+addC(["New York 7:30","New York 7:30 PM"], "New York 7:30");
+addC(["Florida Noche"], "Florida Noche");
+addC(["Florida Tarde"], "Florida Tarde");
+addC(["Loteria Nacional","Lotería Nacional","Nacional"], "Loteria Nacional");
+addC(["Loteria Real","Lotería Real"], "Loteria Real");
+addC(["Gana Mas","Gana Más"], "Gana Mas");
+addC(["La Primera Noche"], "La Primera Noche");
+addC(["La Primera Dia","La Primera Día","Primera Dia","Primera Día"], "Primera Dia");
+addC(["La Suerte Tarde"], "La Suerte Tarde");
+addC(["La Suerte 12:30 PM","La Suerte 12:30"], "La Suerte 12:30 PM");
+addC(["Anguila 10:00 AM"], "Anguila 10:00 AM");
+addC(["Anguila 1:00 PM"], "Anguila 1:00 PM");
+addC(["Anguila 6:00 PM"], "Anguila 6:00 PM");
+addC(["Anguila 9:00 PM"], "Anguila 9:00 PM");
+addC(["Leidsa"], "Leidsa");
+addC(["Leidsa Tarde"], "Leidsa Tarde");
+addC(["Loteka"], "Loteka");
+addC(["LoteDom","Lotedom"], "LoteDom");
+addC(["Quiniela Pale","Quiniela"], "Quiniela Pale");
+addC(["King Lottery","King"], "King Lottery");
+addC(["La Suerte"], "La Suerte");
+
+function canonName(name) { return canonMap[norm(name)] || name; }
+
+var DIAS = ["lunes","martes","miercoles","jueves","viernes","sabado","domingo"];
+var MESES = {"enero":"01","febrero":"02","marzo":"03","abril":"04","mayo":"05","junio":"06","julio":"07","agosto":"08","septiembre":"09","octubre":"10","noviembre":"11","diciembre":"12"};
+
+function parseDate(line) {
+  var ln = norm(line);
+  var found = false;
+  for (var i = 0; i < DIAS.length; i++) {
+    if (ln.startsWith(DIAS[i])) { found = true; break; }
+  }
+  if (!found) return null;
+  var parts = ln.split(/\s+/);
+  var day = null, month = null, year = null;
+  for (var j = 0; j < parts.length; j++) {
+    var p = parts[j];
+    if (/^\d{1,2}$/.test(p) && parseInt(p) <= 31) day = p.padStart(2, "0");
+    if (MESES[p]) month = MESES[p];
+    if (/^\d{4}$/.test(p)) year = p;
+  }
+  if (day && month) {
+    if (!year) year = String(new Date().getFullYear());
+    return year + "-" + month + "-" + day;
+  }
+  return null;
+}
+
+/* ============================================================
+   PARSER — one number per line format
+   ============================================================ */
+function parseResultados(text, defaultFecha) {
+  var results = [];
+  var lines = text.split("\n").map(function(l) { return l.trim(); }).filter(Boolean);
+  var currentLot = null;
+  var currentNums = [];
+  var currentFecha = defaultFecha;
+
+  function flush() {
+    if (currentLot && currentNums.length >= 2) {
+      results.push({
+        loteria: canonName(currentLot),
+        numeros: currentNums.slice(0, 3),
+        primera: currentNums[0],
+        segunda: currentNums[1],
+        tercera: currentNums.length > 2 ? currentNums[2] : null,
+        fecha: currentFecha
+      });
+    }
+    currentNums = [];
+  }
+
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    var fecha = parseDate(line);
+    if (fecha) { flush(); currentLot = null; currentFecha = fecha; continue; }
+    var stripped = line.replace(/[\s\-\.\,\|]+/g, " ").trim();
+    if (/^\d{1,2}$/.test(stripped)) {
+      currentNums.push(parseInt(stripped));
+      if (currentNums.length >= 3) { flush(); currentLot = null; }
+      continue;
+    }
+    var multiNums = stripped.split(/\s+/);
+    var allNums = multiNums.length >= 2 && multiNums.every(function(n) { return /^\d{1,2}$/.test(n); });
+    if (allNums) {
+      flush();
+      currentNums = multiNums.map(Number);
+      flush();
+      currentLot = null;
+      continue;
+    }
+    var matched = matchLot(line);
+    if (matched) { flush(); currentLot = matched; currentNums = []; continue; }
+    var cleaned = line.replace(/[^a-zA-Z0-9\s:áéíóúñÁÉÍÓÚÑ]/g, "").trim();
+    if (cleaned.length > 1 && !/^\d+$/.test(cleaned)) {
+      flush(); currentLot = cleaned; currentNums = [];
+    }
+  }
+  flush();
+  return results;
+}
+
+/* ============================================================
+   HORARIOS CONFIG
+   ============================================================ */
+var HORARIOS = {
+  manana: { label: "Manana", color: "#f59e0b", lots: ["New York 12:30","Loteria Real","Leidsa","Anguila 10:00 AM","La Suerte 12:30 PM","Primera Dia","LoteDom"] },
+  dia: { label: "Dia", color: "#3b82f6", lots: ["New York 3:30","Gana Mas","Anguila 1:00 PM","Florida Tarde","Quiniela Pale"] },
+  tarde: { label: "Tarde", color: "#f97316", lots: ["Loteria Nacional","Leidsa Tarde","New York 7:30","Anguila 6:00 PM","La Suerte Tarde","Loteka"] },
+  noche: { label: "Noche", color: "#8b5cf6", lots: ["New York 10:30 PM","Florida Noche","Anguila 9:00 PM","La Primera Noche","King Lottery"] }
+};
+var ALL_H_LOTS = [];
+Object.values(HORARIOS).forEach(function(h) { h.lots.forEach(function(l) { ALL_H_LOTS.push(l); }); });
+var TARGET = ["Gana Mas","New York 3:30","Loteria Nacional"];
+
+/* ============================================================
+   ENGINE
+   ============================================================ */
+var Engine = {
+  freq: function(h) {
+    var f = new Array(100).fill(0); var r = new Array(100).fill(0); var rc = Math.min(h.length, 30);
+    h.forEach(function(x, i) { x.numeros.forEach(function(n) { f[n]++; if (i < rc) r[n]++; }); });
+    return { f: f, r: r, t: h.length };
+  },
+  burned: function(h) {
+    var c = new Array(100).fill(0);
+    h.slice(0, 15).forEach(function(r) { r.numeros.forEach(function(n) { c[n]++; }); });
+    return c.map(function(x, i) { return { n: i, c: x }; }).filter(function(x) { return x.c >= 3; }).sort(function(a, b) { return b.c - a.c; });
+  },
+  flips: function(n) {
+    var s = String(n).padStart(2, "0"); var d1 = +s[0]; var d2 = +s[1]; var v = new Set();
+    v.add(d2 * 10 + d1);
+    if (n < 99) v.add(n + 1); if (n > 0) v.add(n - 1);
+    if (n + 10 <= 99) v.add(n + 10); if (n - 10 >= 0) v.add(n - 10);
+    v.add((d1 + 1) % 10 * 10 + d2); v.add(((d1 - 1 + 10) % 10) * 10 + d2);
+    v.add(d1 * 10 + (d2 + 1) % 10); v.add(d1 * 10 + ((d2 - 1 + 10) % 10));
+    v.delete(n); return [...v].filter(function(x) { return x >= 0 && x <= 99; });
+  },
+  pos: function(h) {
+    var p = [new Array(100).fill(0), new Array(100).fill(0), new Array(100).fill(0)];
+    h.forEach(function(r) { if (r.primera != null) p[0][r.primera]++; if (r.segunda != null) p[1][r.segunda]++; if (r.tercera != null) p[2][r.tercera]++; });
+    return p;
+  },
+  pairs: function(h) {
+    var m = {};
+    h.forEach(function(r) { for (var i = 0; i < r.numeros.length; i++) for (var j = i + 1; j < r.numeros.length; j++) { var k = [Math.min(r.numeros[i], r.numeros[j]), Math.max(r.numeros[i], r.numeros[j])].join("-"); m[k] = (m[k] || 0) + 1; } });
+    return Object.entries(m).map(function(e) { return { p: e[0], c: e[1] }; }).sort(function(a, b) { return b.c - a.c; }).slice(0, 20);
+  },
+  cycles: function(h) {
+    var last = {}; var cyc = {};
+    h.forEach(function(r, i) { r.numeros.forEach(function(n) { if (last[n] !== undefined) { if (!cyc[n]) cyc[n] = []; cyc[n].push(i - last[n]); } last[n] = i; }); });
+    var res = {};
+    Object.entries(cyc).forEach(function(e) { var n = e[0]; var g = e[1]; if (g.length >= 1) res[n] = { avg: g.reduce(function(a, b) { return a + b; }, 0) / g.length, lg: g[0], tot: g.length + 1 }; });
+    return res;
+  },
+  late: function(h) {
+    var last = {}; h.forEach(function(r, i) { r.numeros.forEach(function(n) { if (last[n] === undefined) last[n] = i; }); });
+    var res = [];
+    for (var i = 0; i < 100; i++) { if (last[i] !== undefined && last[i] > 8) res.push({ n: i, g: last[i] }); else if (last[i] === undefined && h.length > 15) res.push({ n: i, g: h.length }); }
+    return res.sort(function(a, b) { return b.g - a.g; }).slice(0, 15);
+  },
+  counter: function(h) {
+    var self = this; var fr = self.freq(h); var q = self.burned(h); var sug = [];
+    q.forEach(function(qn) { self.flips(qn.n).forEach(function(v) { if (fr.f[v] < fr.f[qn.n] * 0.5) { var o = String(qn.n).padStart(2, "0"); var vs = String(v).padStart(2, "0"); var t = "var"; if (vs === "" + o[1] + o[0]) t = "volteo"; else if (Math.abs(qn.n - v) === 1) t = "+-1"; else if (Math.abs(qn.n - v) === 10) t = "+-10"; sug.push({ b: qn.n, a: v, t: t, r: o + " quemado(x" + qn.c + ") " + t + " " + vs + " frio" }); } }); });
+    return sug.slice(0, 20);
+  },
+  predict: function(h, lot) {
+    var self = this;
+    var lotSpecific = lot ? h.filter(function(r) { return r.loteria === lot; }) : [];
+    var sub = (lotSpecific.length >= 2) ? lotSpecific : h;
+    if (h.length < 2) return { top: [], hot: [], due: [], flip: [], cnt: [], cyc: [] };
+    var fr = self.freq(sub); var rec = fr.r; var q = self.burned(h); var ret = self.late(h);
+    var ct = self.counter(h); var cy = self.cycles(h);
+    var sc = new Array(100).fill(0); var rz = {};
+    var ar = function(i, r) { if (!rz[i]) rz[i] = []; rz[i].push(r); };
+    var mx = Math.max.apply(null, rec);
+    if (mx > 0) rec.forEach(function(f, i) { var s = (f / mx) * 2; sc[i] += s; if (s > 0.5) ar(i, "Caliente(" + f + "x)"); });
+    ct.forEach(function(c) { sc[c.a] += 3; ar(c.a, "Contra: " + c.r); });
+    ret.slice(0, 10).forEach(function(r, i) { sc[r.n] += 2.5 * (1 - i / 10); ar(r.n, "Retrasado(" + r.g + ")"); });
+    Object.entries(cy).forEach(function(e) { var num = parseInt(e[0]); var d = e[1]; if (d.lg >= d.avg * 0.8 && d.lg <= d.avg * 1.3) { sc[num] += 2; ar(num, "Ciclo(c/" + d.avg.toFixed(0) + ")"); } });
+    if (sub.length > 0) {
+      var lastDraw = lotSpecific.length > 0 ? lotSpecific[0] : sub[0];
+      lastDraw.numeros.forEach(function(n) { self.flips(n).forEach(function(v) { sc[v] += 1.5; ar(v, "Volteo de " + String(n).padStart(2, "0")); }); });
+    }
+    q.forEach(function(qn) { sc[qn.n] -= 2; ar(qn.n, "Quemado(" + qn.c + "x)"); });
+    var rk = sc.map(function(s, i) { return { n: i, s: Math.max(0, s), rz: rz[i] || [], d: String(i).padStart(2, "0") }; }).filter(function(x) { return x.s > 0; }).sort(function(a, b) { return b.s - a.s; });
+    return {
+      top: rk.slice(0, 15),
+      hot: rk.filter(function(r) { return r.rz.some(function(z) { return z.includes("Caliente"); }); }).slice(0, 5),
+      due: rk.filter(function(r) { return r.rz.some(function(z) { return z.includes("Retrasado"); }); }).slice(0, 5),
+      flip: rk.filter(function(r) { return r.rz.some(function(z) { return z.includes("Volteo"); }); }).slice(0, 5),
+      cnt: rk.filter(function(r) { return r.rz.some(function(z) { return z.includes("Contra"); }); }).slice(0, 5),
+      cyc: rk.filter(function(r) { return r.rz.some(function(z) { return z.includes("Ciclo"); }); }).slice(0, 5)
+    };
+  }
+};
+
+/* ============================================================
+   STORAGE (localStorage for standalone PWA)
+   ============================================================ */
+async function loadD() { try { var d = localStorage.getItem("lrd7"); return d ? JSON.parse(d) : []; } catch(e) { return []; } }
+async function saveD(d) { try { localStorage.setItem("lrd7", JSON.stringify(d)); } catch(e) {} }
+async function loadK() { try { return localStorage.getItem("lrd7k") || ""; } catch(e) { return ""; } }
+async function saveK(k) { try { localStorage.setItem("lrd7k", k); } catch(e) {} }
+
+var pad = function(n) { return String(n).padStart(2, "0"); };
+
+function hBg(v, mx) {
+  if (!mx || !v) return "rgba(255,255,255,0.03)";
+  var r = v / mx;
+  if (r < 0.25) return "rgba(59,130,246,.25)";
+  if (r < 0.5) return "rgba(234,179,8,.35)";
+  if (r < 0.75) return "rgba(249,115,22,.45)";
+  return "rgba(239,68,68,.6)";
+}
+
+function sC(s, mx) {
+  if (!mx) return "#4b5563";
+  var r = s / mx;
+  if (r > 0.75) return "#ef4444";
+  if (r > 0.5) return "#f97316";
+  if (r > 0.25) return "#eab308";
+  return "#3b82f6";
+}
+
+/* ============================================================
+   COMPONENTS
+   ============================================================ */
+function LotCard(props) {
+  var lot = props.lot;
+  var data = props.data;
+  var fechas = props.fechas;
+  var isTarget = TARGET.includes(lot);
+  var style = isTarget ? { borderColor: "rgba(168,85,247,.3)", background: "rgba(168,85,247,.05)" } : {};
+
+  return (
+    <div className="lc" style={style}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <span style={{ fontWeight: 700, fontSize: 12, color: isTarget ? "#c4b5fd" : "#e2e8f0" }}>{lot}</span>
+        {isTarget && <span style={{ fontSize: 8, background: "rgba(168,85,247,.2)", color: "#c4b5fd", padding: "1px 6px", borderRadius: 4 }}>TARGET</span>}
+      </div>
+      {fechas.slice(0, 3).map(function(f, fi) {
+        var nums = data[f];
+        return (
+          <div key={f} style={{ marginBottom: 4 }}>
+            <div style={{ fontSize: 9, color: "#64748b", marginBottom: 2 }}>{f}</div>
+            {nums ? (
+              <div style={{ display: "flex", gap: 5 }}>
+                {nums.map(function(n, i) {
+                  return <div key={i} className="bl" style={{ background: fi === 0 ? "linear-gradient(135deg,#4f46e5,#6366f1)" : "rgba(255,255,255,.06)", border: fi > 0 ? "1px solid rgba(255,255,255,.1)" : "none", color: fi === 0 ? "#fff" : "#94a3b8", width: fi === 0 ? 42 : 36, height: fi === 0 ? 42 : 36, fontSize: fi === 0 ? 15 : 12 }}>{pad(n)}</div>;
+                })}
+              </div>
+            ) : <div style={{ color: "#4b5563", fontSize: 10, fontStyle: "italic" }}>--</div>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function PredCard(props) {
+  var lot = props.lot;
+  var p = props.pred;
+  if (!p || !p.top || !p.top.length) {
+    return (
+      <div className="cd" style={{ color: "#64748b", fontSize: 12 }}>
+        <h3 style={{ fontFamily: "'Orbitron'", fontSize: 13, color: "#c084fc", marginBottom: 4 }}>{lot}</h3>
+        <p>Datos insuficientes.</p>
+      </div>
+    );
+  }
+  var ms = p.top[0].s || 1;
+  var t = p.top;
+
+  /* THE pick: 1 quiniela, 1 pale, 1 tripleta from highest scored */
+  var q1 = t[0]; /* Best single number */
+  var p1 = t[0]; var p2 = t[1]; /* Best pair */
+  var t1 = t[0]; var t2 = t[1]; var t3 = t[2]; /* Best triple */
+
+  /* Alternates: next best options */
+  var qAlt = t[1]; /* Alternate quiniela */
+  var pAlt1 = t[2]; var pAlt2 = t[3]; /* Alternate pale */
+  var tAlt1 = t[3]; var tAlt2 = t[4]; var tAlt3 = t[5]; /* Alternate tripleta */
+
+  var boxMain = { background: "linear-gradient(135deg, rgba(0,0,0,.5), rgba(15,23,42,.8))", border: "2px solid", borderRadius: 14, padding: "14px 16px", marginBottom: 10 };
+  var boxAlt = { background: "rgba(0,0,0,.25)", border: "1px dashed rgba(255,255,255,.1)", borderRadius: 10, padding: "10px 14px", marginBottom: 8 };
+  var ballL = function(sc) { return { background: "linear-gradient(135deg," + sC(sc, ms) + "," + sC(sc, ms) + "77)", color: "#fff", boxShadow: "0 3px 15px " + sC(sc, ms) + "55", width: 56, height: 56, fontSize: 22 }; };
+  var ballM = function(sc) { return { background: "linear-gradient(135deg," + sC(sc, ms) + "," + sC(sc, ms) + "66)", color: "#fff", boxShadow: "0 2px 10px " + sC(sc, ms) + "33", width: 48, height: 48, fontSize: 18 }; };
+  var ballS = function(sc) { return { background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.15)", color: "#94a3b8", width: 40, height: 40, fontSize: 15 }; };
+  var dash = { color: "#4b5563", fontSize: 16, padding: "0 2px" };
+
+  return (
+    <div className="cd" style={{ paddingBottom: 20 }}>
+      <h3 style={{ fontFamily: "'Orbitron'", fontSize: 14, color: "#c084fc", marginBottom: 14 }}>{lot.toUpperCase()}</h3>
+
+      {/* QUINIELA - Principal */}
+      <div style={Object.assign({}, boxMain, { borderColor: "#fbbf24" })}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <div>
+            <div style={{ fontFamily: "'Orbitron'", fontSize: 12, color: "#fbbf24", fontWeight: 700 }}>QUINIELA</div>
+            <div style={{ fontSize: 9, color: "#64748b" }}>Apuesta fuerte - Paga menos pero mas probable</div>
+          </div>
+          <div style={{ background: "rgba(251,191,36,.15)", border: "1px solid rgba(251,191,36,.3)", borderRadius: 6, padding: "3px 8px", fontSize: 10, color: "#fbbf24", fontWeight: 700 }}>50% del bankroll</div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div className="bl" style={ballL(q1.s)}>{q1.d}</div>
+          <div>
+            <div style={{ fontFamily: "'JetBrains Mono'", fontSize: 14, fontWeight: 700, color: "#fbbf24" }}>{q1.d}</div>
+            <div style={{ fontSize: 10, color: "#94a3b8" }}>{q1.s.toFixed(1) + " puntos"}</div>
+            {q1.rz.slice(0, 2).map(function(r, i) { return <div key={i} style={{ fontSize: 9, color: "#64748b" }}>{r}</div>; })}
+          </div>
+        </div>
+      </div>
+
+      {/* QUINIELA - Alternativa */}
+      {qAlt && <div style={boxAlt}>
+        <div style={{ fontSize: 9, color: "#64748b", marginBottom: 4 }}>Alternativa quiniela</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div className="bl" style={ballS(qAlt.s)}>{qAlt.d}</div>
+          <div style={{ fontSize: 11, color: "#94a3b8" }}>{qAlt.d + " (" + qAlt.s.toFixed(1) + "pts) - " + (qAlt.rz[0] || "")}</div>
+        </div>
+      </div>}
+
+      {/* PALE - Principal */}
+      <div style={Object.assign({}, boxMain, { borderColor: "#34d399" })}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <div>
+            <div style={{ fontFamily: "'Orbitron'", fontSize: 12, color: "#34d399", fontWeight: 700 }}>PALE</div>
+            <div style={{ fontSize: 9, color: "#64748b" }}>Apuesta media - Buen balance riesgo/pago</div>
+          </div>
+          <div style={{ background: "rgba(52,211,153,.15)", border: "1px solid rgba(52,211,153,.3)", borderRadius: 6, padding: "3px 8px", fontSize: 10, color: "#34d399", fontWeight: 700 }}>30% del bankroll</div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div className="bl" style={ballM(p1.s)}>{p1.d}</div>
+          <div style={dash}>-</div>
+          <div className="bl" style={ballM(p2.s)}>{p2.d}</div>
+          <div style={{ marginLeft: 12 }}>
+            <div style={{ fontFamily: "'JetBrains Mono'", fontSize: 14, fontWeight: 700, color: "#34d399" }}>{p1.d + " - " + p2.d}</div>
+            <div style={{ fontSize: 10, color: "#94a3b8" }}>{(p1.s + p2.s).toFixed(1) + " puntos combinados"}</div>
+          </div>
+        </div>
+      </div>
+
+      {/* PALE - Alternativa */}
+      {pAlt1 && pAlt2 && <div style={boxAlt}>
+        <div style={{ fontSize: 9, color: "#64748b", marginBottom: 4 }}>Alternativa pale</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <div className="bl" style={ballS(pAlt1.s)}>{pAlt1.d}</div>
+          <div style={{ color: "#4b5563", fontSize: 12 }}>-</div>
+          <div className="bl" style={ballS(pAlt2.s)}>{pAlt2.d}</div>
+          <div style={{ fontSize: 10, color: "#94a3b8", marginLeft: 8 }}>{(pAlt1.s + pAlt2.s).toFixed(1) + "pts"}</div>
+        </div>
+      </div>}
+
+      {/* TRIPLETA - Principal */}
+      <div style={Object.assign({}, boxMain, { borderColor: "#f97316" })}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <div>
+            <div style={{ fontFamily: "'Orbitron'", fontSize: 12, color: "#f97316", fontWeight: 700 }}>TRIPLETA</div>
+            <div style={{ fontSize: 9, color: "#64748b" }}>Apuesta minima - Baja probabilidad, pago alto</div>
+          </div>
+          <div style={{ background: "rgba(249,115,22,.15)", border: "1px solid rgba(249,115,22,.3)", borderRadius: 6, padding: "3px 8px", fontSize: 10, color: "#f97316", fontWeight: 700 }}>20% del bankroll</div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <div className="bl" style={ballM(t1.s)}>{t1.d}</div>
+          <div style={dash}>-</div>
+          <div className="bl" style={ballM(t2.s)}>{t2.d}</div>
+          <div style={dash}>-</div>
+          <div className="bl" style={ballM(t3.s)}>{t3.d}</div>
+        </div>
+        <div style={{ marginTop: 6 }}>
+          <div style={{ fontFamily: "'JetBrains Mono'", fontSize: 13, fontWeight: 700, color: "#f97316" }}>{t1.d + " - " + t2.d + " - " + t3.d}</div>
+          <div style={{ fontSize: 10, color: "#94a3b8" }}>{(t1.s + t2.s + t3.s).toFixed(1) + " puntos combinados"}</div>
+        </div>
+      </div>
+
+      {/* TRIPLETA - Alternativa */}
+      {tAlt1 && tAlt2 && tAlt3 && <div style={boxAlt}>
+        <div style={{ fontSize: 9, color: "#64748b", marginBottom: 4 }}>Alternativa tripleta</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+          <div className="bl" style={ballS(tAlt1.s)}>{tAlt1.d}</div>
+          <div style={{ color: "#4b5563", fontSize: 12 }}>-</div>
+          <div className="bl" style={ballS(tAlt2.s)}>{tAlt2.d}</div>
+          <div style={{ color: "#4b5563", fontSize: 12 }}>-</div>
+          <div className="bl" style={ballS(tAlt3.s)}>{tAlt3.d}</div>
+          <div style={{ fontSize: 10, color: "#94a3b8", marginLeft: 6 }}>{(tAlt1.s + tAlt2.s + tAlt3.s).toFixed(1) + "pts"}</div>
+        </div>
+      </div>}
+
+      {/* WHY these numbers */}
+      <div style={{ background: "rgba(0,0,0,.2)", borderRadius: 10, padding: "10px 12px", marginTop: 6 }}>
+        <div style={{ fontFamily: "'Orbitron'", fontSize: 9, color: "#64748b", marginBottom: 6 }}>ANALISIS DE SELECCION</div>
+        {t.slice(0, 4).map(function(x, i) {
+          return (
+            <div key={i} style={{ marginBottom: 4 }}>
+              <span style={{ fontFamily: "'JetBrains Mono'", fontWeight: 700, fontSize: 12, color: sC(x.s, ms) }}>{x.d}</span>
+              <span style={{ fontSize: 9, color: "#94a3b8" }}>{" - " + x.rz.join(" | ")}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function CalcTab(props) {
+  var bk = props.bankroll;
+  var setBankroll = props.setBankroll;
+  var qPay = 70; var pPay = 700; var tPay = 50000;
+  var qBet = Math.round(bk * 0.50); var pBet = Math.round(bk * 0.30); var tBet = Math.round(bk * 0.20);
+  var qWin = qBet * qPay; var pWin = pBet * pPay; var tWin = tBet * tPay;
+  var riskScore = bk <= 200 ? 8 : bk <= 500 ? 6 : bk <= 1000 ? 4 : 3;
+  var rs = { display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 10, marginBottom: 8 };
+  var lb = { fontFamily: "'Orbitron'", fontSize: 12, fontWeight: 700 };
+  var ns = { fontFamily: "'JetBrains Mono'", fontWeight: 700, fontSize: 18 };
+  var ss = { fontSize: 10, color: "#94a3b8" };
+
+  return (
+    <div>
+      <div className="cd">
+        <h3 style={{ fontFamily: "'Orbitron'", fontSize: 13, color: "#818cf8", marginBottom: 10 }}>CALCULADORA DE RIESGO</h3>
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ fontSize: 11, color: "#94a3b8", display: "block", marginBottom: 4 }}>Dinero disponible (RD$)</label>
+          <input type="number" value={bk} onChange={function(e) { setBankroll(Math.max(0, parseInt(e.target.value) || 0)); }} style={{ width: "100%", background: "rgba(0,0,0,.4)", border: "1px solid rgba(99,102,241,.3)", borderRadius: 10, color: "#fff", padding: "12px 16px", fontFamily: "'JetBrains Mono'", fontSize: 22, fontWeight: 700, outline: "none", textAlign: "center" }} />
+        </div>
+        <div style={{ background: "rgba(0,0,0,.3)", borderRadius: 10, padding: "10px 14px", marginBottom: 14 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+            <span style={{ fontSize: 11, color: "#94a3b8" }}>Nivel de riesgo</span>
+            <span style={{ fontFamily: "'Orbitron'", fontSize: 12, fontWeight: 700, color: riskScore > 6 ? "#ef4444" : riskScore > 4 ? "#f59e0b" : "#34d399" }}>{riskScore > 6 ? "ALTO" : riskScore > 4 ? "MEDIO" : "BAJO"}</span>
+          </div>
+          <div style={{ height: 6, background: "rgba(255,255,255,.08)", borderRadius: 3 }}>
+            <div style={{ height: "100%", width: (riskScore * 10) + "%", borderRadius: 3, background: riskScore > 6 ? "linear-gradient(90deg,#f59e0b,#ef4444)" : riskScore > 4 ? "linear-gradient(90deg,#34d399,#f59e0b)" : "linear-gradient(90deg,#34d399,#3b82f6)" }} />
+          </div>
+          <div style={{ fontSize: 9, color: "#64748b", marginTop: 4 }}>{riskScore > 6 ? "Bankroll bajo. Considera solo quiniela." : riskScore > 4 ? "Bankroll moderado. Buena distribucion." : "Buen bankroll para mantener varios dias."}</div>
+        </div>
+      </div>
+      <div className="cd">
+        <h3 style={{ fontFamily: "'Orbitron'", fontSize: 12, color: "#fbbf24", marginBottom: 12 }}>DISTRIBUCION RECOMENDADA</h3>
+        <div style={Object.assign({}, rs, { background: "rgba(251,191,36,.08)", border: "1px solid rgba(251,191,36,.2)" })}>
+          <div style={{ flex: 1 }}>
+            <div style={Object.assign({}, lb, { color: "#fbbf24" })}>QUINIELA (50%)</div>
+            <div style={ss}>Mas probable - Apuesta fuerte</div>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={Object.assign({}, ns, { color: "#fbbf24" })}>{"RD$" + qBet}</div>
+            <div style={{ fontSize: 9, color: "#64748b" }}>{"Ganas: RD$" + qWin.toLocaleString()}</div>
+          </div>
+        </div>
+        <div style={Object.assign({}, rs, { background: "rgba(52,211,153,.08)", border: "1px solid rgba(52,211,153,.2)" })}>
+          <div style={{ flex: 1 }}>
+            <div style={Object.assign({}, lb, { color: "#34d399" })}>PALE (30%)</div>
+            <div style={ss}>Balance riesgo/pago</div>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={Object.assign({}, ns, { color: "#34d399" })}>{"RD$" + pBet}</div>
+            <div style={{ fontSize: 9, color: "#64748b" }}>{"Ganas: RD$" + pWin.toLocaleString()}</div>
+          </div>
+        </div>
+        <div style={Object.assign({}, rs, { background: "rgba(249,115,22,.08)", border: "1px solid rgba(249,115,22,.2)" })}>
+          <div style={{ flex: 1 }}>
+            <div style={Object.assign({}, lb, { color: "#f97316" })}>TRIPLETA (20%)</div>
+            <div style={ss}>Baja probabilidad, pago masivo</div>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={Object.assign({}, ns, { color: "#f97316" })}>{"RD$" + tBet}</div>
+            <div style={{ fontSize: 9, color: "#64748b" }}>{"Ganas: RD$" + tWin.toLocaleString()}</div>
+          </div>
+        </div>
+        <div style={{ background: "rgba(0,0,0,.3)", borderRadius: 10, padding: "10px 14px", marginTop: 6 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+            <span style={{ fontSize: 11, color: "#94a3b8" }}>Total apostado</span>
+            <span style={{ fontFamily: "'JetBrains Mono'", fontWeight: 700, color: "#e2e8f0" }}>{"RD$" + bk}</span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+            <span style={{ fontSize: 11, color: "#94a3b8" }}>Si pegas quiniela</span>
+            <span style={{ fontFamily: "'JetBrains Mono'", fontWeight: 700, color: "#fbbf24" }}>{"RD$" + qWin.toLocaleString()}</span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+            <span style={{ fontSize: 11, color: "#94a3b8" }}>Si pegas pale</span>
+            <span style={{ fontFamily: "'JetBrains Mono'", fontWeight: 700, color: "#34d399" }}>{"RD$" + pWin.toLocaleString()}</span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between" }}>
+            <span style={{ fontSize: 11, color: "#94a3b8" }}>Si pegas tripleta</span>
+            <span style={{ fontFamily: "'JetBrains Mono'", fontWeight: 700, color: "#f97316" }}>{"RD$" + tWin.toLocaleString()}</span>
+          </div>
+        </div>
+      </div>
+      <div className="cd">
+        <h3 style={{ fontFamily: "'Orbitron'", fontSize: 12, color: "#818cf8", marginBottom: 8 }}>CONSEJOS DE GESTION</h3>
+        <div style={{ fontSize: 11, lineHeight: 1.7, color: "#94a3b8" }}>
+          {bk < 100 && <div style={{ color: "#f87171", marginBottom: 4 }}>Con menos de RD$100, juega solo quiniela.</div>}
+          {bk >= 100 && bk < 300 && <div style={{ marginBottom: 4 }}>Con este bankroll enfocate en quiniela + pale.</div>}
+          {bk >= 300 && <div style={{ marginBottom: 4 }}>Buen bankroll para las 3 jugadas. Mantente disciplinado.</div>}
+          <div style={{ marginBottom: 4 }}>Nunca juegues mas del 10% de tu ingreso mensual.</div>
+          <div style={{ marginBottom: 4 }}>Si pierdes 3 dias seguidos, para y espera.</div>
+          <div>Lleva registro de ganancias y perdidas.</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   MAIN APP
+   ============================================================ */
+export default function App() {
+  var _a = useState([]), hist = _a[0], setHist = _a[1];
+  var _b = useState(""), paste = _b[0], setPaste = _b[1];
+  var _c = useState(new Date().toISOString().slice(0, 10)), fechaHoy = _c[0], setFH = _c[1];
+  var _d = useState({}), lotR = _d[0], setLotR = _d[1];
+  var _e = useState(null), an = _e[0], setAn = _e[1];
+  var _f = useState("loterias"), tab = _f[0], setTab = _f[1];
+  var _g = useState("all"), hor = _g[0], setHor = _g[1];
+  var _h = useState(null), st = _h[0], setSt = _h[1];
+  var _i = useState(false), shH = _i[0], setShH = _i[1];
+  var _j = useState(""), aiK = _j[0], setAiK = _j[1];
+  var _k = useState(""), aiR = _k[0], setAiR = _k[1];
+  var _l = useState(false), aiL = _l[0], setAiL = _l[1];
+  var _m = useState(null), dbg = _m[0], setDbg = _m[1];
+  var _n = useState(500), bankroll = _n[0], setBankroll = _n[1];
+  var _o = useState(false), fetchL = _o[0], setFetchL = _o[1];
+  var _p = useState(""), fetchLog = _p[0], setFetchLog = _p[1];
+  var _q = useState(7), fetchDays = _q[0], setFetchDays = _q[1];
+  var ref = useRef(null);
+
+  useEffect(function() {
+    loadD().then(function(d) {
+      loadK().then(function(k) { if (k) setAiK(k); });
+      if (d.length) { setHist(d); bld(d); setSt({ t: "info", m: d.length + " sorteos cargados" }); }
+    });
+  }, []);
+
+  function bld(data) {
+    var m = {};
+    data.forEach(function(r) { if (!m[r.loteria]) m[r.loteria] = {}; m[r.loteria][r.fecha] = r.numeros; });
+    setLotR(m);
+  }
+
+  function proc() {
+    if (!paste.trim()) { setSt({ t: "error", m: "Pega los resultados" }); return; }
+    var parsed = parseResultados(paste, fechaHoy);
+    setDbg(parsed);
+    if (!parsed.length) { setSt({ t: "error", m: "No se detectaron resultados" }); return; }
+    var nuevos = parsed.map(function(r) { return Object.assign({}, r, { id: r.fecha + "|" + r.loteria + "|" + r.numeros.join(",") }); });
+    setHist(function(prev) {
+      var ids = new Set(prev.map(function(r) { return r.id; }));
+      var uniq = nuevos.filter(function(n) { return !ids.has(n.id); });
+      var up = uniq.concat(prev);
+      saveD(up); bld(up);
+      var dupes = nuevos.length - uniq.length;
+      setSt({ t: uniq.length > 0 ? "ok" : "warn", m: (uniq.length > 0 ? uniq.length + " agregados" : "Ya estaban") + (dupes > 0 ? " (" + dupes + " dupl)" : "") + " | Detectados: " + parsed.length + " | Total: " + up.length });
+      return up;
+    });
+  }
+
+  function analyze() {
+    if (hist.length < 2) { setSt({ t: "error", m: "Minimo 2 sorteos" }); return; }
+    var a = { fr: Engine.freq(hist), bn: Engine.burned(hist), lt: Engine.late(hist), pr: Engine.pairs(hist), ps: Engine.pos(hist), ct: Engine.counter(hist), cy: Engine.cycles(hist), pp: {}, pg: Engine.predict(hist, null) };
+    TARGET.forEach(function(l) { a.pp[l] = Engine.predict(hist, l); });
+    setAn(a); setTab("pred");
+    setSt({ t: "ok", m: hist.length + " sorteos analizados" });
+    setTimeout(function() { if (ref.current) ref.current.scrollIntoView({ behavior: "smooth" }); }, 200);
+  }
+
+  function aiGo() {
+    if (!aiK.trim()) { setSt({ t: "error", m: "Ingresa API key" }); setTab("ia"); return; }
+    if (hist.length < 2) { setSt({ t: "error", m: "Minimo 2 sorteos" }); return; }
+    setAiL(true); setAiR(""); setTab("ia");
+    var u = hist.slice(0, 60);
+    var resumen = u.map(function(r) { return r.fecha + " | " + r.loteria + " | " + r.numeros.map(pad).join(" "); }).join("\n");
+    fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": aiK, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+      body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 2500, messages: [{ role: "user", content: "Eres experto en loterias dominicanas. Analiza estos " + u.length + " sorteos:\n1.PATRONES repetidos, correlaciones entre loterias\n2.QUEMADOS a evitar\n3.VOLTEOS: si 24 quemado sugerir 42,23,25,14,34\n4.CONTRA-TENDENCIA: alternativas +-1,+-10\n5.PREDICCIONES: Gana Mas, New York 3:30, Loteria Nacional - 5 numeros c/u\n6.CICLOS debidos\n7.CORRELACION entre loterias del dia\n\nDATOS:\n" + resumen + "\n\nNumeros concretos y razones." }] })
+    }).then(function(r) { return r.json(); }).then(function(d) {
+      if (d.error) setAiR("Error: " + d.error.message);
+      else setAiR(d.content ? d.content.map(function(c) { return c.text || ""; }).join("\n") : "Sin respuesta");
+      setAiL(false);
+    }).catch(function(e) { setAiR("Error: " + e.message); setAiL(false); });
+  }
+
+  function autoFetch() {
+    if (!aiK.trim()) { setSt({ t: "error", m: "Necesitas API key en tab IA" }); setTab("ia"); return; }
+    setFetchL(true); setFetchLog("Preparando busqueda...\n");
+    var existDates = new Set();
+    hist.forEach(function(r) { existDates.add(r.fecha); });
+    var missing = [];
+    for (var i = 1; i <= fetchDays; i++) {
+      var d = new Date(); d.setDate(d.getDate() - i);
+      var ds = d.toISOString().slice(0, 10);
+      if (!existDates.has(ds)) missing.push(ds);
+    }
+    if (missing.length === 0) { setFetchLog("Ya tienes todos los datos de los ultimos " + fetchDays + " dias!"); setFetchL(false); return; }
+    setFetchLog("Faltan " + missing.length + " dias.\nBuscando fecha por fecha para mejores resultados...\n\n");
+
+    var totalAdded = 0;
+    var idx = 0;
+
+    function fetchOne() {
+      if (idx >= missing.length) {
+        setFetchLog(function(prev) { return prev + "\n--- COMPLETADO ---\n" + totalAdded + " sorteos nuevos agregados en total."; });
+        setFetchL(false);
+        return;
+      }
+      var fecha = missing[idx];
+      var fechaParts = fecha.split("-");
+      var dia = parseInt(fechaParts[2]);
+      var mes = parseInt(fechaParts[1]);
+      var anio = fechaParts[0];
+      var meses = ["","enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
+      var fechaTexto = dia + " de " + meses[mes] + " " + anio;
+
+      setFetchLog(function(prev) { return prev + "Buscando " + fecha + "...\n"; });
+
+      var prompt = "Busca los resultados de loterias dominicanas del " + fechaTexto + " (" + fecha + ") en quinielasrd.com o loteriasdominicanas.com o loteriasrd.com.\n\nNecesito que busques en la web y me des los numeros ganadores de ese dia.\n\nIMPORTANTE: Responde UNICAMENTE con los datos en este formato, SIN explicaciones, SIN disculpas, SIN texto adicional:\n\n" + fecha + "\nNew York 12:30\n00\n00\n00\nLoteria Real\n00\n00\n00\nGana Mas\n00\n00\n00\n\nSi encuentras datos parciales, dame los que encuentres. Si no encuentras un sorteo especifico, simplemente no lo incluyas. NUNCA inventes numeros. Solo datos reales que encuentres en la web.";
+
+      fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": aiK, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514", max_tokens: 3000,
+          tools: [{ type: "web_search_20250305", name: "web_search" }],
+          messages: [{ role: "user", content: prompt }]
+        })
+      }).then(function(r) { return r.json(); }).then(function(d) {
+        if (d.error) {
+          setFetchLog(function(prev) { return prev + "  Error: " + d.error.message + "\n"; });
+          idx++; setTimeout(fetchOne, 500); return;
+        }
+        var text = "";
+        if (d.content) {
+          d.content.forEach(function(block) { if (block.type === "text") text += block.text + "\n"; });
+        }
+        if (!text.trim()) {
+          setFetchLog(function(prev) { return prev + "  Sin datos para " + fecha + "\n"; });
+          idx++; setTimeout(fetchOne, 500); return;
+        }
+        /* Parse response */
+        var parsed = parseAutoResponse(text, fecha);
+        if (parsed.length === 0) {
+          setFetchLog(function(prev) { return prev + "  No se encontraron datos parseables para " + fecha + "\n"; });
+          idx++; setTimeout(fetchOne, 500); return;
+        }
+        /* Add to hist */
+        var nuevos = parsed.map(function(r) { return Object.assign({}, r, { id: r.fecha + "|" + r.loteria + "|" + r.numeros.join(",") }); });
+        setHist(function(prev) {
+          var ids = new Set(prev.map(function(r) { return r.id; }));
+          var uniq = nuevos.filter(function(n) { return !ids.has(n.id); });
+          var up = uniq.concat(prev);
+          saveD(up); bld(up);
+          totalAdded += uniq.length;
+          setFetchLog(function(prev2) { return prev2 + "  " + uniq.length + " sorteos agregados de " + fecha + "\n"; });
+          return up;
+        });
+        idx++; setTimeout(fetchOne, 800);
+      }).catch(function(e) {
+        setFetchLog(function(prev) { return prev + "  Error red: " + e.message + "\n"; });
+        idx++; setTimeout(fetchOne, 1000);
+      });
+    }
+    fetchOne();
+  }
+
+  /* Flexible parser for AI auto-fetch responses */
+  function parseAutoResponse(text, defaultFecha) {
+    var results = [];
+    var lines = text.split("\n").map(function(l) { return l.trim(); }).filter(Boolean);
+    var curFecha = defaultFecha;
+    var curLot = null;
+    var curNums = [];
+
+    function fl() {
+      if (curLot && curNums.length >= 2 && curFecha) {
+        results.push({ loteria: canonName(curLot), numeros: curNums.slice(0, 3), primera: curNums[0], segunda: curNums[1], tercera: curNums.length > 2 ? curNums[2] : null, fecha: curFecha });
+      }
+      curNums = [];
+    }
+
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      /* Skip markdown, bullet points, explanatory text */
+      if (line.startsWith("#") || line.startsWith("*") || line.startsWith("-") && line.length > 5 && !/^\d/.test(line.replace(/^-\s*/, ""))) continue;
+      if (line.toLowerCase().startsWith("lo siento") || line.toLowerCase().startsWith("no encontr") || line.toLowerCase().startsWith("nota:") || line.toLowerCase().startsWith("fuente")) continue;
+      /* ISO date */
+      var isoM = line.match(/^(\d{4}-\d{2}-\d{2})/);
+      if (isoM) { fl(); curLot = null; curFecha = isoM[1]; continue; }
+      /* FECHA: header */
+      var fM = line.match(/FECHA:\s*(\d{4}-\d{2}-\d{2})/i);
+      if (fM) { fl(); curLot = null; curFecha = fM[1]; continue; }
+      /* Spanish date */
+      var pd = parseDate(line);
+      if (pd) { fl(); curLot = null; curFecha = pd; continue; }
+      /* Single number */
+      var singleNum = line.replace(/^[-*•]\s*/, "").trim();
+      if (/^\d{1,2}$/.test(singleNum)) { curNums.push(parseInt(singleNum)); if (curNums.length >= 3) { fl(); curLot = null; } continue; }
+      /* Numbers with separator: "17 59 64" or "17, 59, 64" or "17-59-64" */
+      var numLine = line.replace(/^[-*•]\s*/, "").replace(/[,;\|]+/g, " ").trim();
+      var numParts = numLine.split(/\s+/);
+      if (numParts.length >= 2 && numParts.length <= 4 && numParts.every(function(p) { return /^\d{1,2}$/.test(p); })) {
+        fl(); curNums = numParts.map(Number); fl(); curLot = null; continue;
+      }
+      /* "Loteria: 17 59 64" or "Loteria - 17, 59, 64" */
+      var lotNumMatch = line.match(/^(.+?)[\s:\-]+(\d{1,2})[\s,\-]+(\d{1,2})[\s,\-]+(\d{1,2})\s*$/);
+      if (lotNumMatch) {
+        fl();
+        var lotName = lotNumMatch[1].replace(/^[-*•]\s*/, "").trim();
+        var ml = matchLot(lotName);
+        if (ml) { curLot = ml; } else { curLot = lotName; }
+        curNums = [parseInt(lotNumMatch[2]), parseInt(lotNumMatch[3]), parseInt(lotNumMatch[4])];
+        fl(); curLot = null; continue;
+      }
+      /* Lottery name */
+      var ml2 = matchLot(line);
+      if (ml2) { fl(); curLot = ml2; curNums = []; continue; }
+      /* Unknown text - possible lottery name */
+      var cleaned = line.replace(/^[-*•#]\s*/, "").replace(/[^a-zA-Z0-9\s:áéíóúñÁÉÍÓÚÑ]/g, "").trim();
+      if (cleaned.length > 2 && !/^\d+$/.test(cleaned) && cleaned.split(" ").length <= 5) {
+        fl(); curLot = cleaned; curNums = [];
+      }
+    }
+    fl();
+    return results;
+  }
+
+  function ejemplo() {
+    setPaste("New York 10:30 PM\n17\n61\n75\nFlorida Noche\n02\n27\n66\nLotería Nacional\n24\n65\n91\nAnguila 9:00 PM\n46\n27\n77\nLeidsa\n89\n12\n59\nLoteka\n19\n36\n20\nLa Primera Noche\n61\n71\n19\nLa Suerte Tarde\n52\n48\n79\nAnguila 6:00 PM\n63\n25\n65\nNew York 3:30\n21\n75\n15\nGana Más\n99\n60\n26\nFlorida Tarde\n84\n43\n58\nLotería Real\n60\n04\n16\nAnguila 1:00 PM\n88\n66\n11\nLa Suerte 12:30 PM\n87\n26\n59\nPrimera Día\n04\n16\n52\nLoteDom\n79\n51\n71\nAnguila 10:00 AM\n65\n94\n58\nJUEVES 12 FEBRERO 2026\nNew York 10:30 PM\n35\n74\n65\nFlorida Noche\n51\n28\n97\nLotería Nacional\n02\n94\n37\nAnguila 9:00 PM\n40\n34\n59\nLeidsa\n17\n53\n92\nLoteka\n82\n09\n48\nLa Primera Noche\n50\n50\n07\nLa Suerte Tarde\n90\n06\n79\nAnguila 6:00 PM\n68\n56\n16\nNew York 3:30\n66\n36\n81\nGana Más\n45\n19\n65\nFlorida Tarde\n22\n17\n92\nLotería Real\n59\n82\n97\nAnguila 1:00 PM\n21\n20\n28\nLa Suerte 12:30 PM\n32\n34\n61\nPrimera Día\n27\n75\n74\nLoteDom\n73\n96\n37\nAnguila 10:00 AM\n63\n70\n31");
+    setSt({ t: "info", m: "Ejemplo cargado (36 sorteos, 2 fechas)" });
+  }
+
+  var fechas = [];
+  var fechaSet = new Set();
+  hist.forEach(function(r) { if (!fechaSet.has(r.fecha)) { fechaSet.add(r.fecha); fechas.push(r.fecha); } });
+  fechas.sort().reverse();
+
+  var allLots = [];
+  var lotSet = new Set();
+  hist.forEach(function(r) { if (!lotSet.has(r.loteria)) { lotSet.add(r.loteria); allLots.push(r.loteria); } });
+
+  var extraLots = allLots.filter(function(l) { return ALL_H_LOTS.indexOf(l) === -1; });
+
+  var horEntries = hor === "all" ? Object.entries(HORARIOS) : [[hor, HORARIOS[hor]]];
+  horEntries = horEntries.filter(function(e) { return e[1]; });
+
+  var stColors = { ok: ["rgba(16,185,129,.1)", "#34d399"], error: ["rgba(239,68,68,.1)", "#f87171"], warn: ["rgba(234,179,8,.1)", "#fbbf24"], info: ["rgba(99,102,241,.1)", "#818cf8"] };
+
+  return (
+    <div style={{ minHeight: "100vh", background: "linear-gradient(160deg,#080b14,#0d1525 40%,#111827)", color: "#e2e8f0", fontFamily: "'Segoe UI',system-ui,sans-serif" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=JetBrains+Mono:wght@400;700&display=swap');
+        *{box-sizing:border-box;margin:0;padding:0}
+        ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:#4f46e5;border-radius:3px}
+        @keyframes pu{0%,100%{box-shadow:0 0 12px rgba(99,102,241,.3)}50%{box-shadow:0 0 24px rgba(99,102,241,.6)}}
+        @keyframes su{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+        @keyframes pp{0%{transform:scale(.5);opacity:0}60%{transform:scale(1.08)}100%{transform:scale(1);opacity:1}}
+        .cd{background:rgba(15,23,42,.8);border:1px solid rgba(99,102,241,.15);border-radius:14px;padding:16px;backdrop-filter:blur(10px);animation:su .4s ease;margin-bottom:10px}
+        .b{padding:10px 18px;border:none;border-radius:10px;font-weight:600;font-size:14px;cursor:pointer;transition:all .2s;display:inline-flex;align-items:center;gap:6px;font-family:inherit}
+        .b:hover{transform:translateY(-1px)}.b:active{transform:translateY(0)}
+        .bp{background:linear-gradient(135deg,#4f46e5,#7c3aed);color:#fff}
+        .bg{background:linear-gradient(135deg,#059669,#10b981);color:#fff}
+        .ba{background:linear-gradient(135deg,#d97706,#f59e0b);color:#1a1a2e}
+        .bd{background:linear-gradient(135deg,#dc2626,#ef4444);color:#fff}
+        .bh{background:rgba(255,255,255,.05);color:#94a3b8;border:1px solid rgba(255,255,255,.1)}
+        .bh:hover{background:rgba(255,255,255,.1);color:#fff}
+        .t{padding:8px 14px;border:none;background:rgba(255,255,255,.05);color:#94a3b8;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;transition:all .2s;font-family:inherit}
+        .t.on{background:linear-gradient(135deg,#4f46e5,#6366f1);color:#fff}.t:hover:not(.on){background:rgba(255,255,255,.1);color:#fff}
+        textarea{width:100%;min-height:120px;background:rgba(0,0,0,.4);border:1px solid rgba(99,102,241,.2);border-radius:12px;color:#e2e8f0;font-family:'JetBrains Mono',monospace;font-size:12px;padding:12px;resize:vertical;outline:none}
+        textarea:focus{border-color:#6366f1}
+        input[type=date],input[type=password],input[type=number]{background:rgba(0,0,0,.4);border:1px solid rgba(99,102,241,.2);border-radius:8px;color:#e2e8f0;padding:8px 12px;font-family:inherit;outline:none;font-size:13px}
+        .bl{display:inline-flex;align-items:center;justify-content:center;width:42px;height:42px;border-radius:50%;font-family:'JetBrains Mono',monospace;font-weight:700;font-size:15px;animation:pp .3s ease}
+        .lc{background:rgba(0,0,0,.3);border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:12px;transition:border-color .2s}
+        .lc:hover{border-color:rgba(99,102,241,.25)}
+      `}</style>
+      <div style={{ maxWidth: 960, margin: "0 auto", padding: 12 }}>
+
+        {/* HEADER */}
+        <header style={{ textAlign: "center", padding: "20px 0 12px" }}>
+          <div style={{ fontSize: 38 }}>🎯</div>
+          <h1 style={{ fontFamily: "'Orbitron'", fontSize: "clamp(17px,5vw,26px)", fontWeight: 900, background: "linear-gradient(135deg,#818cf8,#a78bfa,#c084fc)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>ANALIZADOR PRO RD</h1>
+          <p style={{ color: "#64748b", fontSize: 11, marginTop: 3 }}>Volteos | Contra-Tendencia | Ciclos | IA Claude</p>
+          {hist.length > 0 && (
+            <div style={{ display: "flex", justifyContent: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+              <span style={{ background: "#818cf818", border: "1px solid #818cf833", borderRadius: 6, padding: "2px 9px", fontSize: 11, fontWeight: 600, color: "#818cf8" }}>{hist.length} Sorteos</span>
+              <span style={{ background: "#a78bfa18", border: "1px solid #a78bfa33", borderRadius: 6, padding: "2px 9px", fontSize: 11, fontWeight: 600, color: "#a78bfa" }}>{fechas.length} Fechas</span>
+              <span style={{ background: "#c084fc18", border: "1px solid #c084fc33", borderRadius: 6, padding: "2px 9px", fontSize: 11, fontWeight: 600, color: "#c084fc" }}>{allLots.length} Loterias</span>
+            </div>
+          )}
+        </header>
+
+        {/* STATUS */}
+        {st && (
+          <div style={{ padding: "8px 12px", borderRadius: 9, marginBottom: 8, fontSize: 12, fontWeight: 600, background: (stColors[st.t] || stColors.info)[0], color: (stColors[st.t] || stColors.info)[1] }}>{st.m}</div>
+        )}
+
+        {/* INPUT */}
+        <div className="cd">
+          <div style={{ marginBottom: 8 }}>
+            <label style={{ fontSize: 10, color: "#94a3b8" }}>Fecha por defecto (si no hay fecha en el texto)</label>
+            <input type="date" value={fechaHoy} onChange={function(e) { setFH(e.target.value); }} style={{ width: "100%", marginTop: 2 }} />
+          </div>
+          <textarea value={paste} onChange={function(e) { setPaste(e.target.value); }} placeholder={"Pega resultados de quinielasrd.com...\n\nNew York 3:30\n17\n59\n64\nGana Mas\n22\n41\n07"} />
+          <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+            <button className="b bp" onClick={proc}>Procesar</button>
+            <button className="b ba" onClick={ejemplo}>Ejemplo</button>
+            <button className="b bh" onClick={function() { setPaste(""); setDbg(null); }}>Limpiar</button>
+            <button className="b bd" onClick={function() { if (confirm("Borrar TODO?")) { setHist([]); setLotR({}); setAn(null); saveD([]); setSt({ t: "info", m: "Borrado" }); } }} style={{ marginLeft: "auto", fontSize: 12 }}>Borrar Todo</button>
+          </div>
+        </div>
+
+        {/* DEBUG */}
+        {dbg && dbg.length > 0 && (
+          <div style={{ background: "rgba(16,185,129,.06)", border: "1px solid rgba(16,185,129,.15)", borderRadius: 10, padding: "10px 12px", marginBottom: 10, fontSize: 11 }}>
+            <div style={{ color: "#34d399", fontWeight: 700, marginBottom: 6 }}>{"Detectados: " + dbg.length + " sorteos"}</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+              {dbg.map(function(r, i) {
+                return (
+                  <span key={i} style={{ background: "rgba(0,0,0,.3)", padding: "2px 7px", borderRadius: 5, fontSize: 10 }}>
+                    <span style={{ color: "#94a3b8" }}>{r.fecha + " " + r.loteria + ":"}</span>{" "}
+                    <span style={{ color: "#a78bfa", fontFamily: "'JetBrains Mono'", fontWeight: 700 }}>{r.numeros.map(pad).join(" ")}</span>
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* TABS */}
+        <div style={{ display: "flex", gap: 4, marginBottom: 10, flexWrap: "wrap" }}>
+          {[["loterias", "Loterias"], ["pred", "Predicciones"], ["calc", "Calculadora"], ["fetch", "Auto-Datos"], ["heat", "Heatmap"], ["volt", "Volteos"], ["cyc", "Ciclos"], ["ia", "IA"]].map(function(item) {
+            return <button key={item[0]} className={"t " + (tab === item[0] ? "on" : "")} onClick={function() { setTab(item[0]); }}>{item[1]}</button>;
+          })}
+        </div>
+
+        {/* TAB: LOTERIAS */}
+        {tab === "loterias" && (
+          <div>
+            <div style={{ display: "flex", gap: 4, marginBottom: 10, flexWrap: "wrap" }}>
+              {[["all", "Todas"], ["manana", "Manana"], ["dia", "Dia"], ["tarde", "Tarde"], ["noche", "Noche"]].map(function(item) {
+                return <button key={item[0]} className={"t " + (hor === item[0] ? "on" : "")} onClick={function() { setHor(item[0]); }}>{item[1]}</button>;
+              })}
+            </div>
+            {horEntries.map(function(entry) {
+              var hk = entry[0]; var hd = entry[1];
+              return (
+                <div key={hk} style={{ marginBottom: 14 }}>
+                  <h3 style={{ fontFamily: "'Orbitron'", fontSize: 12, color: hd.color, marginBottom: 8 }}>{hd.label.toUpperCase()}</h3>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 8 }}>
+                    {hd.lots.map(function(lot) {
+                      return <LotCard key={lot} lot={lot} data={lotR[lot] || {}} fechas={fechas} />;
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+            {extraLots.length > 0 && (
+              <div style={{ marginBottom: 14 }}>
+                <h3 style={{ fontFamily: "'Orbitron'", fontSize: 12, color: "#94a3b8", marginBottom: 8 }}>OTRAS DETECTADAS</h3>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 8 }}>
+                  {extraLots.map(function(lot) {
+                    return <LotCard key={lot} lot={lot} data={lotR[lot] || {}} fechas={fechas} />;
+                  })}
+                </div>
+              </div>
+            )}
+            <button className="b bg" onClick={analyze} style={{ width: "100%", padding: 14, fontSize: 15, fontFamily: "'Orbitron'", fontWeight: 700, marginTop: 6, animation: hist.length >= 3 ? "pu 2s infinite" : "none" }}>
+              {"ANALIZAR " + hist.length + " SORTEOS"}
+            </button>
+          </div>
+        )}
+
+        {/* TAB: PRED */}
+        {tab === "pred" && (
+          <div ref={ref}>
+            {!an ? (
+              <div className="cd" style={{ textAlign: "center", padding: 30, color: "#64748b" }}>
+                <p>Presiona Analizar primero</p>
+                <button className="b bg" onClick={analyze} style={{ marginTop: 12 }}>Analizar</button>
+              </div>
+            ) : (
+              <div>
+                {TARGET.map(function(lot) { return <PredCard key={lot} lot={lot} pred={an.pp[lot]} />; })}
+                {an.pg && an.pg.top && an.pg.top.length > 0 && (
+                  <div className="cd">
+                    <h3 style={{ fontFamily: "'Orbitron'", fontSize: 13, color: "#fbbf24", marginBottom: 10 }}>PREDICCION GENERAL</h3>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {an.pg.top.map(function(x, i) {
+                        return (
+                          <div key={i} style={{ textAlign: "center" }}>
+                            <div className="bl" style={{ border: "2px solid " + sC(x.s, an.pg.top[0].s || 1), background: "transparent", color: "#fff", width: 38, height: 38, fontSize: 13 }}>{x.d}</div>
+                            <div style={{ fontSize: 7, color: "#64748b", marginTop: 1 }}>{x.s.toFixed(1)}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB: HEAT */}
+        {tab === "heat" && (an ? (
+          <div className="cd">
+            <h3 style={{ fontFamily: "'Orbitron'", fontSize: 13, color: "#818cf8", marginBottom: 10 }}>MAPA DE CALOR</h3>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(10,1fr)", gap: 2 }}>
+              {an.fr.f.map(function(f, i) {
+                return (
+                  <div key={i} style={{ background: hBg(f, Math.max.apply(null, an.fr.f)), borderRadius: 4, padding: "4px 0", textAlign: "center" }}>
+                    <div style={{ fontFamily: "'JetBrains Mono'", fontWeight: 700, fontSize: 11, color: f > 0 ? "#fff" : "#4b5563" }}>{pad(i)}</div>
+                    <div style={{ fontSize: 7, color: "#94a3b8" }}>{"x" + f}</div>
+                  </div>
+                );
+              })}
+            </div>
+            <h4 style={{ fontFamily: "'Orbitron'", fontSize: 11, color: "#818cf8", margin: "14px 0 6px" }}>PARES</h4>
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+              {an.pr.slice(0, 12).map(function(p, i) {
+                return <span key={i} style={{ background: "rgba(168,85,247,.1)", border: "1px solid rgba(168,85,247,.2)", padding: "2px 7px", borderRadius: 5, fontFamily: "'JetBrains Mono'", fontSize: 10, fontWeight: 600, color: "#c4b5fd" }}>{p.p.split("-").map(function(n) { return n.padStart(2, "0"); }).join("-") + " x" + p.c}</span>;
+              })}
+            </div>
+          </div>
+        ) : <div className="cd" style={{ textAlign: "center", color: "#64748b", padding: 24 }}>Analiza primero</div>)}
+
+        {/* TAB: VOLT */}
+        {tab === "volt" && (an ? (
+          <div className="cd">
+            <h3 style={{ fontFamily: "'Orbitron'", fontSize: 13, color: "#818cf8", marginBottom: 10 }}>CONTRA-TENDENCIA Y VOLTEOS</h3>
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 11, color: "#f87171", marginBottom: 4, fontWeight: 700 }}>QUEMADOS</div>
+              <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+                {an.bn.length === 0 ? <span style={{ color: "#64748b", fontSize: 10 }}>Ninguno</span> :
+                  an.bn.map(function(q, i) {
+                    return (
+                      <div key={i} style={{ background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.2)", borderRadius: 8, padding: "5px 10px", textAlign: "center" }}>
+                        <div style={{ fontFamily: "'JetBrains Mono'", fontWeight: 700, fontSize: 15, color: "#f87171" }}>{pad(q.n)}</div>
+                        <div style={{ fontSize: 8, color: "#94a3b8" }}>{"x" + q.c}</div>
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
+            <div style={{ fontSize: 11, color: "#34d399", marginBottom: 4, fontWeight: 700 }}>ALTERNATIVAS</div>
+            <div style={{ display: "grid", gap: 4 }}>
+              {an.ct.length === 0 ? <span style={{ color: "#64748b", fontSize: 10 }}>Agrega mas datos</span> :
+                an.ct.slice(0, 15).map(function(c, i) {
+                  return (
+                    <div key={i} style={{ background: "rgba(16,185,129,.05)", border: "1px solid rgba(16,185,129,.1)", borderRadius: 8, padding: "5px 9px", display: "flex", alignItems: "center", gap: 8 }}>
+                      <div style={{ fontFamily: "'JetBrains Mono'", fontWeight: 700, fontSize: 15, color: "#34d399", minWidth: 26 }}>{pad(c.a)}</div>
+                      <div style={{ fontSize: 10, color: "#d1d5db" }}>{c.r}</div>
+                    </div>
+                  );
+                })}
+            </div>
+          </div>
+        ) : <div className="cd" style={{ textAlign: "center", color: "#64748b", padding: 24 }}>Analiza primero</div>)}
+
+        {/* TAB: CYC */}
+        {tab === "cyc" && (an ? (
+          <div className="cd">
+            <h3 style={{ fontFamily: "'Orbitron'", fontSize: 13, color: "#818cf8", marginBottom: 10 }}>CICLOS Y RETRASADOS</h3>
+            <div style={{ display: "grid", gap: 4 }}>
+              {Object.entries(an.cy).sort(function(a, b) {
+                var aw = a[1].lg >= a[1].avg * 0.8 && a[1].lg <= a[1].avg * 1.3;
+                var bw = b[1].lg >= b[1].avg * 0.8 && b[1].lg <= b[1].avg * 1.3;
+                if (aw !== bw) return bw ? 1 : -1;
+                return a[1].avg - b[1].avg;
+              }).slice(0, 20).map(function(entry, i) {
+                var n = entry[0]; var d = entry[1];
+                var w = d.lg >= d.avg * 0.8 && d.lg <= d.avg * 1.3;
+                return (
+                  <div key={i} style={{ background: w ? "rgba(16,185,129,.06)" : "rgba(0,0,0,.2)", border: "1px solid " + (w ? "rgba(16,185,129,.15)" : "rgba(255,255,255,.04)"), borderRadius: 8, padding: "6px 9px", display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ fontFamily: "'JetBrains Mono'", fontWeight: 700, fontSize: 15, color: w ? "#34d399" : "#64748b", minWidth: 26 }}>{pad(n)}</div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 10 }}>{"Cada " + d.avg.toFixed(1) + " sorteos"} {w && <span style={{ color: "#34d399", fontWeight: 700 }}>EN VENTANA</span>}</div>
+                      <div style={{ marginTop: 2, height: 3, background: "rgba(255,255,255,.06)", borderRadius: 2 }}>
+                        <div style={{ height: "100%", width: Math.min(100, (d.lg / d.avg) * 100) + "%", background: w ? "#34d399" : "#4f46e5", borderRadius: 2 }} />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <h4 style={{ fontFamily: "'Orbitron'", fontSize: 11, color: "#fbbf24", margin: "12px 0 6px" }}>RETRASADOS</h4>
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+              {an.lt.map(function(r, i) {
+                return (
+                  <div key={i} style={{ background: "rgba(234,179,8,.06)", border: "1px solid rgba(234,179,8,.15)", borderRadius: 6, padding: "4px 9px", textAlign: "center" }}>
+                    <div style={{ fontFamily: "'JetBrains Mono'", fontWeight: 700, fontSize: 13, color: "#fbbf24" }}>{pad(r.n)}</div>
+                    <div style={{ fontSize: 7, color: "#94a3b8" }}>{r.g + " sin salir"}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ) : <div className="cd" style={{ textAlign: "center", color: "#64748b", padding: 24 }}>Analiza primero</div>)}
+
+        {/* TAB: IA */}
+        {tab === "ia" && (
+          <div>
+            <div className="cd">
+              <h3 style={{ fontFamily: "'Orbitron'", fontSize: 13, color: "#818cf8", marginBottom: 6 }}>ANALISIS CON IA (Claude API)</h3>
+              <p style={{ fontSize: 10, color: "#64748b", marginBottom: 8 }}>Key de console.anthropic.com. Se guarda automaticamente.</p>
+              <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+                <input type="password" value={aiK} onChange={function(e) { setAiK(e.target.value); }} placeholder="sk-ant-api03-..." style={{ flex: 1, padding: "8px 10px", fontSize: 12 }} />
+                <button className="b bp" onClick={function() { if (aiK) { saveK(aiK); setSt({ t: "ok", m: "Key guardada" }); } }}>Guardar</button>
+              </div>
+              <button className="b bp" onClick={aiGo} disabled={aiL} style={{ width: "100%", padding: 12, fontSize: 14, fontFamily: "'Orbitron'", fontWeight: 700, opacity: aiL ? 0.6 : 1 }}>
+                {aiL ? "Analizando..." : "ANALIZAR CON IA"}
+              </button>
+            </div>
+            {aiR && <div className="cd"><div style={{ fontSize: 12, lineHeight: 1.6, color: "#d1d5db", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{aiR}</div></div>}
+          </div>
+        )}
+
+        {/* TAB: CALCULADORA */}
+        {tab === "calc" && <CalcTab bankroll={bankroll} setBankroll={setBankroll} />}
+
+        {/* TAB: AUTO-FETCH */}
+        {tab === "fetch" && (
+          <div>
+            <div className="cd">
+              <h3 style={{ fontFamily: "'Orbitron'", fontSize: 13, color: "#818cf8", marginBottom: 6 }}>CARGAR DATOS AUTOMATICOS</h3>
+              <p style={{ fontSize: 11, color: "#64748b", marginBottom: 10 }}>Usa la API de Claude con busqueda web para encontrar resultados de dias que te faltan automaticamente.</p>
+
+              {!aiK && <div style={{ background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.2)", borderRadius: 8, padding: "8px 12px", marginBottom: 10, fontSize: 11, color: "#f87171" }}>Necesitas configurar tu API key en la pestana IA primero.</div>}
+
+              <div style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 4 }}>Dias hacia atras a buscar</label>
+                <div style={{ display: "flex", gap: 6 }}>
+                  {[3, 7, 14, 30].map(function(d) {
+                    return <button key={d} className={"t " + (fetchDays === d ? "on" : "")} onClick={function() { setFetchDays(d); }}>{d + " dias"}</button>;
+                  })}
+                </div>
+              </div>
+
+              <div style={{ background: "rgba(0,0,0,.3)", borderRadius: 8, padding: "8px 12px", marginBottom: 10 }}>
+                <div style={{ fontSize: 11, color: "#e2e8f0", marginBottom: 4 }}>Estado de datos:</div>
+                <div style={{ fontSize: 10, color: "#94a3b8" }}>
+                  {"Tienes " + hist.length + " sorteos de " + fechas.length + " fechas diferentes."}
+                </div>
+                {fechas.length > 0 && <div style={{ fontSize: 10, color: "#64748b" }}>
+                  {"Ultima fecha: " + fechas[0] + " | Primera: " + fechas[fechas.length - 1]}
+                </div>}
+              </div>
+
+              <button className="b bp" onClick={autoFetch} disabled={fetchL || !aiK} style={{ width: "100%", padding: 13, fontSize: 14, fontFamily: "'Orbitron'", fontWeight: 700, opacity: (fetchL || !aiK) ? 0.5 : 1 }}>
+                {fetchL ? "Buscando datos..." : "BUSCAR " + fetchDays + " DIAS DE DATOS"}
+              </button>
+            </div>
+
+            {fetchLog && (
+              <div className="cd">
+                <div style={{ fontSize: 11, lineHeight: 1.6, color: "#d1d5db", whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "'JetBrains Mono'", maxHeight: 300, overflow: "auto" }}>{fetchLog}</div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* HISTORIAL */}
+        <button className="b bh" onClick={function() { setShH(!shH); }} style={{ width: "100%", justifyContent: "center", marginTop: 6, marginBottom: 6, fontSize: 12 }}>
+          {(shH ? "Ocultar" : "Ver") + " Historial (" + hist.length + ")"}
+        </button>
+        {shH && hist.length > 0 && (
+          <div className="cd" style={{ maxHeight: 280, overflow: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10 }}>
+              <thead>
+                <tr style={{ borderBottom: "1px solid rgba(99,102,241,.15)" }}>
+                  <th style={{ textAlign: "left", padding: 4, color: "#818cf8", fontSize: 9 }}>Fecha</th>
+                  <th style={{ textAlign: "left", padding: 4, color: "#818cf8", fontSize: 9 }}>Loteria</th>
+                  <th style={{ textAlign: "center", padding: 4, color: "#818cf8", fontSize: 9 }}>1ra</th>
+                  <th style={{ textAlign: "center", padding: 4, color: "#818cf8", fontSize: 9 }}>2da</th>
+                  <th style={{ textAlign: "center", padding: 4, color: "#818cf8", fontSize: 9 }}>3ra</th>
+                </tr>
+              </thead>
+              <tbody>
+                {hist.slice(0, 100).map(function(r, i) {
+                  return (
+                    <tr key={i} style={{ borderBottom: "1px solid rgba(255,255,255,.02)" }}>
+                      <td style={{ padding: "3px 4px", fontFamily: "'JetBrains Mono'", fontSize: 9 }}>{r.fecha}</td>
+                      <td style={{ padding: "3px 4px", fontSize: 10 }}>{r.loteria}</td>
+                      {r.numeros.map(function(n, j) {
+                        return <td key={j} style={{ padding: "3px 4px", textAlign: "center", fontFamily: "'JetBrains Mono'", fontWeight: 700, color: "#a78bfa" }}>{pad(n)}</td>;
+                      })}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div style={{ textAlign: "center", padding: 10, fontSize: 9, color: "#64748b", marginTop: 10 }}>
+          Loterias = 100% azar. Analisis estadistico para entretenimiento. Juega responsable.
+        </div>
+      </div>
+    </div>
+  );
+}
